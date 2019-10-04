@@ -57,18 +57,6 @@ func NewTargetManagers(
 			journalScrapeConfigs = append(journalScrapeConfigs, cfg)
 		}
 	}
-	if len(journalScrapeConfigs) > 0 {
-		journalTargetManager, err := NewJournalTargetManager(
-			logger,
-			positions,
-			client,
-			journalScrapeConfigs,
-		)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to make journal target manager")
-		}
-		targetManagers = append(targetManagers, journalTargetManager)
-	}
 
 	return &TargetManagers{targetManagers: targetManagers}, nil
 

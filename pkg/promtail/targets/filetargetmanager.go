@@ -27,7 +27,8 @@ import (
 
 const (
 	pathLabel = "__path__"
-	hostLabel = "__host__"
+	hostLabel = "__meta_kubernetes_pod_node_name"
+	hostField = "spec.nodeName"
 )
 
 var (
@@ -66,7 +67,6 @@ func NewFileTargetManager(
 		syncers: map[string]*targetSyncer{},
 		manager: discovery.NewManager(ctx, log.With(logger, "component", "discovery")),
 	}
-
 	hostname, err := hostname()
 	if err != nil {
 		return nil, err
@@ -119,6 +119,14 @@ func NewFileTargetManager(
 			targetConfig:   targetConfig,
 		}
 		tm.syncers[cfg.JobName] = s
+		for _, kube := range cfg.ServiceDiscoveryConfig.KubernetesSDConfigs {
+			podSelector := fmt.Sprintf("%s=%s", hostField, hostname)
+			if len(kube.Selectors.Pod.Field) == 0 {
+				kube.Selectors.Pod.Field = podSelector
+			} else {
+				kube.Selectors.Pod.Field = fmt.Sprintf("%s,%s", kube.Selectors.Pod.Field, podSelector)
+			}
+		}
 		config[cfg.JobName] = cfg.ServiceDiscoveryConfig
 	}
 
@@ -199,72 +207,72 @@ func (s *targetSyncer) sync(groups []*targetgroup.Group) {
 	dropped := []Target{}
 
 	for _, group := range groups {
-		for _, t := range group.Targets {
-			level.Debug(s.log).Log("msg", "new target", "labels", t)
+		host, ok := group.Labels[hostLabel]
+		if ok && string(host) != s.hostname {
+			dropped = append(dropped, newDroppedTarget(fmt.Sprintf("ignoring target, wrong host (labels:%s hostname:%s)", group.Labels.String(), s.hostname), group.Labels))
+			level.Debug(s.log).Log("msg", "ignoring target, wrong host", "labels", group.Labels.String(), "hostname", s.hostname)
+			failedTargets.WithLabelValues("wrong_host").Inc()
+			continue
+		} else {
+			for _, t := range group.Targets {
+				level.Debug(s.log).Log("msg", "new target", "labels", t)
 
-			discoveredLabels := group.Labels.Merge(t)
-			var labelMap = make(map[string]string)
-			for k, v := range discoveredLabels.Clone() {
-				labelMap[string(k)] = string(v)
-			}
-
-			processedLabels := relabel.Process(labels.FromMap(labelMap), s.relabelConfig...)
-
-			var labels = make(model.LabelSet)
-			for k, v := range processedLabels.Map() {
-				labels[model.LabelName(k)] = model.LabelValue(v)
-			}
-
-			// Drop empty targets (drop in relabeling).
-			if processedLabels == nil {
-				dropped = append(dropped, newDroppedTarget("dropping target, no labels", discoveredLabels))
-				level.Debug(s.log).Log("msg", "dropping target, no labels")
-				failedTargets.WithLabelValues("empty_labels").Inc()
-				continue
-			}
-
-			host, ok := labels[hostLabel]
-			if ok && string(host) != s.hostname {
-				dropped = append(dropped, newDroppedTarget(fmt.Sprintf("ignoring target, wrong host (labels:%s hostname:%s)", labels.String(), s.hostname), discoveredLabels))
-				level.Debug(s.log).Log("msg", "ignoring target, wrong host", "labels", labels.String(), "hostname", s.hostname)
-				failedTargets.WithLabelValues("wrong_host").Inc()
-				continue
-			}
-
-			path, ok := labels[pathLabel]
-			if !ok {
-				dropped = append(dropped, newDroppedTarget("no path for target", discoveredLabels))
-				level.Info(s.log).Log("msg", "no path for target", "labels", labels.String())
-				failedTargets.WithLabelValues("no_path").Inc()
-				continue
-			}
-
-			for k := range labels {
-				if strings.HasPrefix(string(k), "__") {
-					delete(labels, k)
+				discoveredLabels := group.Labels.Merge(t)
+				var labelMap = make(map[string]string)
+				for k, v := range discoveredLabels.Clone() {
+					labelMap[string(k)] = string(v)
 				}
-			}
 
-			key := labels.String()
-			targets[key] = struct{}{}
-			if _, ok := s.targets[key]; ok {
-				dropped = append(dropped, newDroppedTarget("ignoring target, already exists", discoveredLabels))
-				level.Debug(s.log).Log("msg", "ignoring target, already exists", "labels", labels.String())
-				failedTargets.WithLabelValues("exists").Inc()
-				continue
-			}
+				processedLabels := relabel.Process(labels.FromMap(labelMap), s.relabelConfig...)
+				var labels = make(model.LabelSet)
 
-			level.Info(s.log).Log("msg", "Adding target", "key", key)
-			t, err := s.newTarget(string(path), labels, discoveredLabels)
-			if err != nil {
-				dropped = append(dropped, newDroppedTarget(fmt.Sprintf("Failed to create target: %s", err.Error()), discoveredLabels))
-				level.Error(s.log).Log("msg", "Failed to create target", "key", key, "error", err)
-				failedTargets.WithLabelValues("error").Inc()
-				continue
-			}
+				for k, v := range processedLabels.Map() {
+					labels[model.LabelName(k)] = model.LabelValue(v)
+				}
 
-			targetsActive.Add(1.)
-			s.targets[key] = t
+				// Drop empty targets (drop in relabeling).
+				if processedLabels == nil {
+					dropped = append(dropped, newDroppedTarget("dropping target, no labels", discoveredLabels))
+					level.Debug(s.log).Log("msg", "dropping target, no labels")
+					failedTargets.WithLabelValues("empty_labels").Inc()
+					continue
+				}
+
+				path, ok := labels[pathLabel]
+				if !ok {
+					dropped = append(dropped, newDroppedTarget("no path for target", discoveredLabels))
+					level.Info(s.log).Log("msg", "no path for target", "labels", labels.String())
+					failedTargets.WithLabelValues("no_path").Inc()
+					continue
+				}
+
+				for k := range labels {
+					if strings.HasPrefix(string(k), "__") {
+						delete(labels, k)
+					}
+				}
+
+				key := labels.String()
+				targets[key] = struct{}{}
+				if _, ok := s.targets[key]; ok {
+					dropped = append(dropped, newDroppedTarget("ignoring target, already exists", discoveredLabels))
+					level.Debug(s.log).Log("msg", "ignoring target, already exists", "labels", labels.String())
+					failedTargets.WithLabelValues("exists").Inc()
+					continue
+				}
+
+				level.Info(s.log).Log("msg", "Adding target", "key", key)
+				t, err := s.newTarget(string(path), labels, discoveredLabels)
+				if err != nil {
+					dropped = append(dropped, newDroppedTarget(fmt.Sprintf("Failed to create target: %s", err.Error()), discoveredLabels))
+					level.Error(s.log).Log("msg", "Failed to create target", "key", key, "error", err)
+					failedTargets.WithLabelValues("error").Inc()
+					continue
+				}
+
+				targetsActive.Add(1.)
+				s.targets[key] = t
+			}
 		}
 	}
 
