@@ -57,7 +57,6 @@ func NewTargetManagers(
 			journalScrapeConfigs = append(journalScrapeConfigs, cfg)
 		}
 	}
-
 	if len(journalScrapeConfigs) > 0 {
 		journalTargetManager, err := NewJournalTargetManager(
 			logger,
