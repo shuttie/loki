@@ -207,13 +207,8 @@ func (s *targetSyncer) sync(groups []*targetgroup.Group) {
 	dropped := []Target{}
 
 	for _, group := range groups {
-		host, ok := group.Labels[hostLabel]
-		if ok && string(host) != s.hostname {
-			dropped = append(dropped, newDroppedTarget(fmt.Sprintf("ignoring target, wrong host (labels:%s hostname:%s)", group.Labels.String(), s.hostname), group.Labels))
-			level.Debug(s.log).Log("msg", "ignoring target, wrong host", "labels", group.Labels.String(), "hostname", s.hostname)
-			failedTargets.WithLabelValues("wrong_host").Inc()
-			continue
-		} else {
+		_, ok := group.Labels[hostLabel]
+		if ok {
 			for _, t := range group.Targets {
 				level.Debug(s.log).Log("msg", "new target", "labels", t)
 
@@ -224,10 +219,10 @@ func (s *targetSyncer) sync(groups []*targetgroup.Group) {
 				}
 
 				processedLabels := relabel.Process(labels.FromMap(labelMap), s.relabelConfig...)
-				var labels = make(model.LabelSet)
+				var labelNameValueMap = make(model.LabelSet)
 
 				for k, v := range processedLabels.Map() {
-					labels[model.LabelName(k)] = model.LabelValue(v)
+					labelNameValueMap[model.LabelName(k)] = model.LabelValue(v)
 				}
 
 				// Drop empty targets (drop in relabeling).
@@ -238,31 +233,31 @@ func (s *targetSyncer) sync(groups []*targetgroup.Group) {
 					continue
 				}
 
-				path, ok := labels[pathLabel]
+				path, ok := labelNameValueMap[pathLabel]
 				if !ok {
 					dropped = append(dropped, newDroppedTarget("no path for target", discoveredLabels))
-					level.Info(s.log).Log("msg", "no path for target", "labels", labels.String())
+					level.Info(s.log).Log("msg", "no path for target", "labels", labelNameValueMap.String())
 					failedTargets.WithLabelValues("no_path").Inc()
 					continue
 				}
 
-				for k := range labels {
+				for k := range labelNameValueMap {
 					if strings.HasPrefix(string(k), "__") {
-						delete(labels, k)
+						delete(labelNameValueMap, k)
 					}
 				}
 
-				key := labels.String()
+				key := labelNameValueMap.String()
 				targets[key] = struct{}{}
 				if _, ok := s.targets[key]; ok {
 					dropped = append(dropped, newDroppedTarget("ignoring target, already exists", discoveredLabels))
-					level.Debug(s.log).Log("msg", "ignoring target, already exists", "labels", labels.String())
+					level.Debug(s.log).Log("msg", "ignoring target, already exists", "labels", labelNameValueMap.String())
 					failedTargets.WithLabelValues("exists").Inc()
 					continue
 				}
 
 				level.Info(s.log).Log("msg", "Adding target", "key", key)
-				t, err := s.newTarget(string(path), labels, discoveredLabels)
+				t, err := s.newTarget(string(path), labelNameValueMap, discoveredLabels)
 				if err != nil {
 					dropped = append(dropped, newDroppedTarget(fmt.Sprintf("Failed to create target: %s", err.Error()), discoveredLabels))
 					level.Error(s.log).Log("msg", "Failed to create target", "key", key, "error", err)
